@@ -1,0 +1,32 @@
+[project]
+name = "margin"
+version = "0.1.0"
+description = "A calm research paper reader with a multi-agent LangGraph tutor."
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.2,<2",
+  "langchain-groq>=1.1,<2",
+  "langchain-core>=1.7,<2",
+  "fastapi>=0.162",
+  "uvicorn>=0.54",
+  "pypdf>=6.21",
+  "python-multipart>=0.0.33",
+  "python-dotenv>=1.0",
+  "langchain-ollama>=1.1.0",
+  "httpx>=0.28.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "fpdf2>=2.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["margin"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

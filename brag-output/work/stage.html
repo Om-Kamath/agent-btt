@@ -1,0 +1,46 @@
+<!doctype html><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#F1F3F2;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+#win{position:absolute;left:100px;top:186px;width:1720px;height:930px;overflow:hidden;border-radius:18px;background:#F1F3F2;box-shadow:0 0 0 1px rgba(0,0,0,.07),0 24px 70px rgba(20,40,34,.14)}
+#app{position:absolute;left:0;top:0;width:1600px;height:1000px;transform-origin:0 0;display:block}
+#cur{position:absolute;left:0;top:0;width:26px;height:36px;transform-origin:2px 2px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.28))}
+.cap{position:absolute;left:0;right:0;top:66px;text-align:center;font-size:64px;font-weight:600;letter-spacing:-1.3px;color:#1D1D1F;opacity:0}
+#dip{position:absolute;inset:0;background:#12362F;opacity:0}
+#end{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;opacity:0}
+#nameWrap{position:relative;padding:0 26px;margin-bottom:26px}
+#name{position:relative;font-size:176px;font-weight:650;letter-spacing:-5px;line-height:1.1}
+#mark{position:absolute;left:0;top:18%;height:70%;width:100%;background:#9BE3C4;opacity:.3;border-radius:8px;transform-origin:left;transform:scaleX(0)}
+#sub{font-size:44px;font-weight:500;letter-spacing:-.5px;color:#D8E8E1;opacity:0}
+#run{margin-top:26px;font-size:28px;color:#9BE3C4;opacity:0}#run code{font:600 28px ui-monospace,Menlo,monospace}
+</style>
+<div id="win"><img id="app"><svg id="cur" viewBox="0 0 26 36"><path d="M2 2 L2 28 L8.6 22.2 L13 32.5 L17.6 30.6 L13.2 20.5 L22 20.5 Z" fill="#111" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/></svg></div>
+<div class="cap" data-s="0" data-e="3">Stuck on one sentence?</div>
+<div class="cap" data-s="3" data-e="5.25">Highlight it.</div>
+<div class="cap" data-s="5.25" data-e="7.5">Everything else goes quiet.</div>
+<div class="cap" data-s="7.5" data-e="9.75">An explanation appears beside the page.</div>
+<div class="cap" data-s="9.75" data-e="12.75">Ask for simpler, deeper, or an example.</div>
+<div class="cap" data-s="12.75" data-e="16.5">Or see it drawn.</div>
+<div class="cap" data-s="16.5" data-e="19" data-last="1">Your papers stay on this computer.</div>
+<div id="dip"></div>
+<div id="end"><div id="nameWrap"><div id="mark"></div><div id="name">Margin</div></div><div id="sub">A calm reader for research papers.</div><div id="run">Run it locally with <code>./run.sh</code></div></div>
+<script>
+const W=1720,H=894,S0=W/1600,cl=(x,a,b)=>Math.min(b,Math.max(a,x)),sm=x=>{x=cl(x,0,1);return x*x*x*(x*(6*x-15)+10)};
+const CAM=[{t:0,cx:760,cy:520,z:1.02},{t:3,cx:720,cy:570,z:1.38,T:3},{t:5.6,cx:800,cy:440,z:1,T:1.1},{t:8.3,cx:1320,cy:400,z:1.3,T:1.1},{t:13.95,cx:800,cy:476,z:1,T:.9},{t:17.3,cx:200,cy:30,z:2.5,T:1.0}];
+function cam(t){let c={...CAM[0]};for(const k of CAM.slice(1)){const x=sm((t-(k.t-k.T))/k.T);c={cx:c.cx+(k.cx-c.cx)*x,cy:c.cy+(k.cy-c.cy)*x,z:c.z+(k.z-c.z)*x}}return c}
+let CUR=null;window.setCursor=c=>CUR=c;
+window.setFrame=async(t,src)=>{const app=document.getElementById('app');
+  if(src){app.src=src;await app.decode()}
+  const c=cam(t),s=S0*c.z,tx=cl(W/2-c.cx*s,W-1600*s,0),ty=cl(H/2-c.cy*s,Math.min(H-1000*s,0),0);
+  app.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;
+  const f=CUR[Math.min(CUR.length-1,Math.round(t*30))],cu=document.getElementById('cur'),clicks=[4.5,12.75],pressed=f.down||clicks.some(k=>t>=k-.03&&t<k+.09);
+  cu.style.transform=`translate(${f.x*s+tx-2}px,${f.y*s+ty-2}px) scale(${pressed?.86:1})`;
+  cu.style.opacity=t<1.05?0:t<1.3?(t-1.05)/.25:t>16.5?cl(1-(t-16.5)/.4,0,1):1;
+  for(const e of document.querySelectorAll('.cap')){const a=+e.dataset.s,b=+e.dataset.e,fi=a===0?1:sm((t-a)/.35),fo=e.dataset.last?1:1-sm((t-(b-.2))/.2),on=t>=a&&t<b;
+    e.style.opacity=on?fi*fo:0;e.style.transform=`translateY(${(1-fi)*10}px)`}
+  document.getElementById('dip').style.opacity=sm((t-18.45)/.3);
+  document.getElementById('end').style.opacity=t>=18.75?1:0;
+  const n=document.getElementById('name');n.style.opacity=sm((t-18.9)/.4);n.style.transform=`translateY(${(1-sm((t-18.9)/.4))*14}px)`;
+  document.getElementById('mark').style.transform=`scaleX(${sm((t-19.1)/.55)})`;
+  document.getElementById('sub').style.opacity=sm((t-19.3)/.4);
+  document.getElementById('run').style.opacity=sm((t-19.5)/.4);
+};
+</script>

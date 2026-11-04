@@ -1,0 +1,54 @@
+{
+ "explain": {
+  "type": "result",
+  "markdown": "This sentence describes the core mathematical procedure of \"Scaled Dot-Product Attention.\" First, the system calculates the dot product between a \"query\" (a representation of what you are looking for) and every \"key\" (a representation of what is available in the input).\n\nNext, this result (the dot product) is divided by the square root of the dimension of the keys ($\\sqrt{d_k}$). This division is called \"scaling\" and is done to prevent the dot products from becoming too large, which helps keep the next step—applying a softmax function—stable and effective.\n\nFinally, the softmax function is applied to these scaled dot products. The softmax function converts these raw numbers into weights that are all positive and sum up to 1, which are then used to weigh the corresponding \"values\" to get the final attention output.",
+  "visual": null,
+  "via": {
+   "provider": "ollama",
+   "model": "gemma4:e4b",
+   "local": true
+  },
+  "check": "passed",
+  "caveat": "",
+  "sources": [
+   {
+    "page": 4,
+    "text": "Scaled Dot-Product Attention Multi-Head Attention Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several attention layers running in parallel. of the values, where the weight assigned to each value i"
+   },
+   {
+    "page": 4,
+    "text": "is effect, we scale the dot products by 1√dk . 3.2.2 Multi-Head Attention Instead of performing a single attention function with dmodel-dimensional keys, values and queries, we found it beneficial to linearly project the queries, keys and v"
+   }
+  ]
+ },
+ "visualize": {
+  "type": "result",
+  "markdown": "",
+  "visual": {
+   "form": "mermaid",
+   "code": "graph TD\n    A[Query Q] --> B;\n    C[Keys K] --> B;\n    B{Compute Dot Product Q K^T};\n    B --> D;\n    D[\"Divide by sqrt(dk)\"];\n    D --> E;\n    E{Apply Softmax Function};\n    E --> F[\"Attention Weights\"];",
+   "caption": "The diagram illustrates the sequential steps of calculating attention weights using the Scaled Dot-Product Attention mechanism."
+  },
+  "via": {
+   "provider": "ollama",
+   "model": "gemma4:e4b",
+   "local": true
+  },
+  "check": "passed",
+  "caveat": "",
+  "sources": [
+   {
+    "page": 4,
+    "text": "Scaled Dot-Product Attention Multi-Head Attention Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several attention layers running in parallel. of the values, where the weight assigned to each value i"
+   },
+   {
+    "page": 4,
+    "text": "is effect, we scale the dot products by 1√dk . 3.2.2 Multi-Head Attention Instead of performing a single attention function with dmodel-dimensional keys, values and queries, we found it beneficial to linearly project the queries, keys and v"
+   },
+   {
+    "page": 3,
+    "text": "y residual connections around each of the sub-layers, followed by layer normalization. We also modify the self-attention sub-layer in the decoder stack to prevent positions from attending to subsequent positions. This masking, combined with"
+   }
+  ]
+ }
+}

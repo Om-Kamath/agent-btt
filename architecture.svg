@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 672" width="1060" height="672" font-family="Helvetica, Arial, sans-serif" font-size="17" fill="#1D1D1F">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#55595C"/></marker>
+    <style>
+      .box{fill:#E6F0EE;stroke:#2F6F6B;stroke-width:1.5}
+      .io{fill:#FFFFFF;stroke:#2F6F6B;stroke-width:1.5}
+      .data{fill:#F1F3F2;stroke:#6E6E73;stroke-width:1.5}
+      .ln{fill:none;stroke:#55595C;stroke-width:1.6;marker-end:url(#a)}
+      .join{fill:none;stroke:#55595C;stroke-width:1.6}
+      .re{fill:none;stroke:#2F6F6B;stroke-width:1.6;stroke-dasharray:6 5;marker-end:url(#a)}
+      .t{text-anchor:middle}
+      .b{font-weight:700}
+      .l{font-size:15px;fill:#3F4346}
+      .lr{font-size:15px;fill:#2F6F6B}
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1060" height="672" fill="#FFFFFF"/>
+
+  <!-- Row 1 -->
+  <rect class="io" x="20" y="35" width="210" height="100" rx="10"/>
+  <text class="t b" x="125" y="65">Student</text><text class="t" x="125" y="89">highlights a passage,</text><text class="t" x="125" y="113">picks what they need</text>
+  <rect class="box" x="270" y="35" width="210" height="100" rx="10"/>
+  <text class="t b" x="375" y="65">Coordinator</text><text class="t" x="375" y="89">passage type,</text><text class="t" x="375" y="113">search terms</text>
+  <rect class="box" x="520" y="35" width="210" height="100" rx="10"/>
+  <text class="t b" x="625" y="65">Librarian (no LLM)</text><text class="t" x="625" y="89">BM25 search, text</text><text class="t" x="625" y="113">around the highlight</text>
+  <path class="box" d="M860 30L980 85L860 140L740 85Z"/>
+  <text class="t" x="860" y="80">Explain or</text><text class="t" x="860" y="102">Visualize?</text>
+  <rect class="data" x="520" y="165" width="210" height="50" rx="10"/><text class="t" x="625" y="196">Paper text, by page</text>
+
+  <path class="ln" d="M230 85H270"/><path class="ln" d="M480 85H520"/><path class="ln" d="M730 85H740"/>
+  <path class="ln" d="M625 165V135"/>
+
+  <!-- Writers -->
+  <rect class="box" x="770" y="250" width="210" height="90" rx="10"/>
+  <text class="t b" x="875" y="280">Tutor</text><text class="t" x="875" y="304">streams an explanation</text><text class="t" x="875" y="326">with page citations</text>
+  <rect class="box" x="770" y="400" width="210" height="90" rx="10"/>
+  <text class="t b" x="875" y="430">Illustrator</text><text class="t" x="875" y="454">Mermaid diagram or</text><text class="t" x="875" y="476">interactive HTML</text>
+  <path class="ln" d="M860 140V250"/><text class="l" x="868" y="200">Explain or follow-up</text>
+  <path class="ln" d="M980 85H1025V445H980"/><text class="l" x="1018" y="262" transform="rotate(90 1018 262)" dy="-12" text-anchor="middle">Visualize</text>
+
+  <!-- Reviewer -->
+  <path class="box" d="M560 305L700 370L560 435L420 370Z"/>
+  <text class="t b" x="560" y="351">Reviewer</text><text class="t" x="560" y="375">matches the paper?</text><text class="t" x="560" y="397">numbers right?</text>
+  <path class="join" d="M770 295H735V445H770"/><path class="ln" d="M735 370H700"/>
+  <path class="re" d="M560 305V235H800V250"/><text class="lr" x="572" y="229">Rejected once: one rewrite with notes</text>
+  <path class="re" d="M560 435V520H875V490"/><text class="lr" x="572" y="512">Rejected once: one redraw with notes</text>
+
+  <!-- Results -->
+  <rect class="io" x="90" y="250" width="210" height="90" rx="10"/>
+  <text class="t b" x="195" y="280">Answer</text><text class="t" x="195" y="304">beside the page, with</text><text class="t" x="195" y="326">citations, model used</text>
+  <rect class="io" x="90" y="400" width="210" height="90" rx="10"/>
+  <text class="t b" x="195" y="430">Answer with</text><text class="t" x="195" y="454">a double-check</text><text class="t" x="195" y="476">warning</text>
+  <path class="join" d="M420 370H345"/><path class="ln" d="M345 370V295H300"/><path class="ln" d="M345 370V445H300"/>
+  <text class="l" x="352" y="288">Approved</text><text class="l" x="352" y="464">Rejected twice</text>
+
+  <!-- Browser -->
+  <rect class="io" x="90" y="540" width="210" height="70" rx="10"/>
+  <text class="t b" x="195" y="568">Browser</text><text class="t" x="195" y="592">runs visuals in a sandbox</text>
+  <path class="ln" d="M195 490V540"/><path class="ln" d="M90 295H55V575H90"/>
+  <path class="re" d="M300 575H925V490"/><text class="lr" x="400" y="597">Visual won't render: one automatic repair, which skips review</text>
+
+  <text x="20" y="650" class="l">Coordinator, Tutor, Illustrator, and Reviewer use Ollama by default, or Groq after the student confirms. Failures never fall back to Groq.</text>
+</svg>
