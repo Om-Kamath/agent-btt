@@ -1,6 +1,6 @@
 """HTTP API: upload a paper, fetch it, and ask the agents about a highlight over server-sent events."""
-import json
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Literal
@@ -9,11 +9,12 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .graph import build_graph, initial_state
-from .llm import build_providers
+from .llm import build_llm, readable_error
 from .papers import InvalidPaper, PaperStore
+from .study import build_guide, explain_citation
 
 log = logging.getLogger(__name__)
 
@@ -37,11 +38,11 @@ class Repair(BaseModel):
 class Ask(BaseModel):
     selection: str
     page: int
-    intent: Literal["explain", "simplify", "deepen", "example", "question", "visualize", "repair"]
+    intent: Literal["explain", "simplify", "deepen", "example", "question", "visualize", "repair", "prerequisites", "quiz", "grade"]
     question: str = Field(default="", max_length=2000)
+    answer: str = Field(default="", max_length=4000)
     history: list[Turn] = []
     repair: Repair | None = None
-    provider: Literal["groq", "ollama"] | None = None
 
     @field_validator("selection")
     @classmethod
@@ -50,20 +51,35 @@ class Ask(BaseModel):
             raise ValueError("selection is empty")
         return value[:MAX_SELECTION_CHARS]
 
+    @model_validator(mode="after")
+    def grading_has_something_to_grade(self):
+        if self.intent == "grade" and not (self.question.strip() and self.answer.strip()):
+            raise ValueError("a grade needs a question and an answer")
+        return self
+
+
+class CitationAsk(BaseModel):
+    numbers: list[int] = Field(min_length=1, max_length=8)
+    page: int
+    marker: str = Field(default="", max_length=200)
+    line: str = Field(default="", max_length=1000)
+
 
 def _describe(paper) -> dict:
-    return {"id": paper.id, "name": paper.name, "pages": len(paper.pages)}
+    return {"id": paper.id, "name": paper.name, "pages": len(paper.pages), "references": sorted(paper.references)}
 
 
 def create_app(data_dir=None, api_key=None, base_url=None, max_upload_bytes=50 * 1024 * 1024, max_retries=2,
-               static_dir=None, provider=None, ollama_url=None, ollama_model=None, allow_cloud=None) -> FastAPI:
+               static_dir=None) -> FastAPI:
     app = FastAPI(title="Margin")
     store = PaperStore(data_dir or ROOT / "data" / "papers")
-    default, providers = build_providers(provider, api_key, base_url, max_retries, ollama_url, ollama_model, allow_cloud)
-    graphs = {name: build_graph(store, p.models) if p.models else None for name, p in providers.items()}
+    llm = build_llm(api_key, base_url, max_retries)
+    graph = build_graph(store, llm.models) if llm.models else None
 
-    def readable(llm, error: Exception) -> str:
-        known = llm.readable_error(error)
+    guide_locks: dict[str, asyncio.Lock] = {}
+
+    def readable(error: Exception) -> str:
+        known = readable_error(error)
         if known:
             return known
         if isinstance(error, ValueError):
@@ -71,15 +87,8 @@ def create_app(data_dir=None, api_key=None, base_url=None, max_upload_bytes=50 *
         return "Something went wrong while answering. Try again."
 
     @app.get("/api/health")
-    async def health(active: str | None = None):
-        chosen = active or default
-
-        async def describe(name, llm):
-            message = await llm.status(preload=name == chosen)
-            return {"ready": not message, "local": llm.local, "message": message, "model": llm.model}
-
-        details = await asyncio.gather(*(describe(name, llm) for name, llm in providers.items()))
-        return {"default": default, "providers": dict(zip(providers, details))}
+    async def health():
+        return {"ready": not llm.setup_message, "message": llm.setup_message, "model": llm.model}
 
     @app.post("/api/papers")
     async def upload(file: UploadFile):
@@ -107,17 +116,37 @@ def create_app(data_dir=None, api_key=None, base_url=None, max_upload_bytes=50 *
         require(paper_id)
         return FileResponse(store.pdf_path(paper_id), media_type="application/pdf")
 
+    @app.post("/api/papers/{paper_id}/guide")
+    async def guide(paper_id: str):
+        paper = require(paper_id)
+        if not llm.models:
+            raise HTTPException(503, llm.setup_message)
+        # The page can ask twice while the first is still writing, and each one costs tokens.
+        async with guide_locks.setdefault(paper_id, asyncio.Lock()):
+            saved = store.read_guide(paper_id)
+            if saved:
+                return saved
+            try:
+                made = await build_guide(llm.models.careful, paper)
+            except Exception as error:
+                log.exception("Guide failed")
+                raise HTTPException(502, readable(error)) from error
+            store.write_guide(paper_id, made)
+            return made
+
+    @app.post("/api/papers/{paper_id}/citation")
+    async def citation(paper_id: str, body: CitationAsk):
+        paper = require(paper_id)
+        careful = llm.models.careful if llm.models else None
+        return await explain_citation(careful, paper, body.numbers, body.page, body.marker, body.line)
+
     @app.post("/api/papers/{paper_id}/ask")
     async def ask(paper_id: str, body: Ask):
         require(paper_id)
-        name = body.provider or default
-        if name not in providers:
-            raise HTTPException(403, "Groq is turned off for this app. Ask again using this computer.")
-        llm, graph = providers[name], graphs[name]
         history = [{"role": t.role, "content": t.content[:MAX_HISTORY_CHARS]} for t in body.history[-HISTORY_TURNS:]]
         state = initial_state(
             paper_id=paper_id, selection=body.selection, page=body.page, intent=body.intent,
-            question=body.question, history=history, repair=body.repair.model_dump() if body.repair else None,
+            question=body.question, answer=body.answer, history=history, repair=body.repair.model_dump() if body.repair else None,
         )
 
         def frame(event: dict) -> str:
@@ -136,15 +165,16 @@ def create_app(data_dir=None, api_key=None, base_url=None, max_upload_bytes=50 *
                         final = chunk
             except Exception as error:
                 log.exception("Agents failed")
-                yield frame({"type": "error", "message": readable(llm, error)})
+                yield frame({"type": "error", "message": readable(error)})
                 return
             yield frame({
                 "type": "result",
                 "markdown": final["draft"],
                 "visual": final["visual"],
-                "via": {"provider": llm.name, "model": llm.model, "local": llm.local},
+                "via": {"provider": "groq", "model": llm.model},
                 "check": final["check"],
                 "caveat": final["caveat"],
+                "study": final.get("study"),
                 "sources": [{"page": p["page"], "text": p["text"][:240]} for p in final["passages"]],
             })
 

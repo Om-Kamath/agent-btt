@@ -12,30 +12,17 @@ Needs [uv](https://docs.astral.sh/uv/) and Node 22.13 or newer.
 
 Keep your key in `.env`, which git ignores, and leave `.env.example` blank.
 
-## Run it privately with Ollama
+Your highlights, your questions, and text from your paper are sent to Groq. Opening a new paper sends the start of every page straight away, to write its guide.
 
-Keep your papers on this computer, with no internet needed once it's set up:
+## Study tools
 
-1. Install [Ollama](https://ollama.com) and run `ollama pull gemma4:e4b` (a 9.5 GB download).
-2. Set `LLM_PROVIDER=ollama` in `.env`.
-3. Run `./run.sh`. The toolbar shows "This computer" as selected.
-
-In this mode:
-
-- Nothing goes to Groq unless you switch to it, and a mistyped provider stops the app instead of falling back to the cloud.
-- Ollama `-cloud` models are refused, because they would send your papers off this computer.
-- LangSmith tracing is turned off.
-
-To use another model, set `OLLAMA_MODEL`. Answers are slower and usually weaker than Groq's, especially interactive visuals.
-
-## Switch between them
-
-Use the toolbar to switch between "This computer" and "Groq". Each answer says which model wrote it.
-
-- Switching to Groq asks you to confirm first, because passages from your paper will be sent to Groq.
-- Each time the app opens, it returns to `LLM_PROVIDER` from `.env`.
-- If Ollama fails, the app shows the error and doesn't try Groq.
-- Set `ALLOW_CLOUD=false` in `.env` to remove Groq from the app completely.
+- **Guide:** when you first open a paper, a side panel says what it claims, what to read first, and what's safe to skim. It's written once per paper from the start of each page, then saved.
+- **Terms:** hover over a term or abbreviation in the paper to see what it means there and where it first appears. The Terms tab lists them all, which also works on touch screens. Terms the paper never uses are dropped.
+- **Citations:** click a numbered citation like `[12]` to see its entry from the reference list and why it's cited there. Author-year citations like (Smith, 2020) aren't supported yet.
+- **Test me:** after an explanation, answer a question in your own words and get it graded against the paper. Quotes offered as evidence are only shown if they're really on that page. Grading can be lenient, so treat a vague answer marked correct with suspicion.
+- **What to know first:** an ordered list of the ideas a passage depends on. Each links to its page, or says it isn't covered in this paper.
+- **Highlights:** list them in reading order, hide them on the page, or remove them.
+- **Export:** save your notes as Markdown, or as a PDF through the browser's print dialog.
 
 ## How it works
 
@@ -51,8 +38,13 @@ highlight -> coordinator -> librarian -> tutor or illustrator -> reviewer -> ans
 | Tutor | Writes the explanation and streams it | `openai/gpt-oss-120b` |
 | Illustrator | Draws a Mermaid diagram or an interactive HTML visual | `openai/gpt-oss-120b` |
 | Reviewer | Checks the work against the paper and redoes calculations | `openai/gpt-oss-20b` |
+| Pathfinder | Orders what to know before a passage | `openai/gpt-oss-120b` |
+| Examiner | Writes a question to test understanding | `openai/gpt-oss-120b` |
+| Grader | Grades the student's answer against the paper | `openai/gpt-oss-120b` |
 
-The table shows the Groq models. With Ollama, every agent uses one local model, so a low-memory computer doesn't have to swap between models. Change Groq's with `GROQ_SMART_MODEL` and `GROQ_FAST_MODEL`. The graph is in `backend/margin/graph.py` and the prompts are in `backend/margin/prompts.py`.
+The agents run on Groq. Change them with `GROQ_SMART_MODEL` and `GROQ_FAST_MODEL`. The graph is in `backend/margin/graph.py` and the prompts are in `backend/margin/prompts.py`.
+
+Every answer shows how it was made. Each step reports what the agent decided, how long it took, its tokens, its exact prompt and reply, and the model's reasoning when the model returns any.
 
 ## Good to know
 
@@ -69,4 +61,4 @@ cd backend && uv run pytest
 cd frontend && npm test
 ```
 
-Tests use a local stand-in for Groq and Ollama (`backend/tests/fake_groq.py`), so they don't need a key.
+Tests use a local stand-in for Groq (`backend/tests/fake_groq.py`), so they don't need a key.

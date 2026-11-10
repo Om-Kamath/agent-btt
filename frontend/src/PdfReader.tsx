@@ -1,8 +1,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { hitTest, selectionRects } from "./lib";
-import type { Highlight, PageMarks } from "./types";
+import { findCitations, findTerms, hitTest, selectionRects } from "./lib";
+import type { GuideTerm, Highlight, PageMarks } from "./types";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 (globalThis as any).pdfjsLib = pdfjs;
@@ -17,8 +17,12 @@ export interface SelectionInfo {
   anchor: { left: number; top: number; bottom: number; width: number };
 }
 
+export interface TextAnchor { left: number; top: number; bottom: number }
+export interface CitationClick { numbers: number[]; page: number; marker: string; line: string; anchor: TextAnchor }
+
 export interface ReaderHandle {
   goToPage(page: number): void;
+  goToMark(page: number, y: number): void;
   zoom(factor: number): void;
   clearSelection(): void;
 }
@@ -27,10 +31,61 @@ interface Props {
   url: string;
   highlights: Highlight[];
   activeId: string | null;
+  terms: GuideTerm[];
+  references: number[];
+  onTerm(term: GuideTerm | null, anchor: TextAnchor | null): void;
+  onCitation(click: CitationClick): void;
   onSelection(info: SelectionInfo | null): void;
   onOpenHighlight(id: string): void;
   onPage(page: number): void;
   onFailure(message: string): void;
+}
+
+/** One line of the PDF's text layer, which pdf.js may split into several spans. */
+interface TextRun { text: string; nodes: { node: Text; start: number }[]; page: number }
+
+function textRunAt(x: number, y: number): TextRun | null {
+  const span = document.elementsFromPoint(x, y).find(
+    (el) => el.tagName === "SPAN" && el.closest(".textLayer") && el.firstChild?.nodeType === Node.TEXT_NODE,
+  );
+  const pageEl = span?.closest<HTMLElement>(".page");
+  if (!span || !pageEl) return null;
+  let first: Element = span;
+  while (first.previousElementSibling?.tagName === "SPAN") first = first.previousElementSibling;
+  const run: TextRun = { text: "", nodes: [], page: Number(pageEl.dataset.pageNumber) };
+  for (let el: Element | null = first; el?.tagName === "SPAN"; el = el.nextElementSibling) {
+    if (el.firstChild?.nodeType !== Node.TEXT_NODE) continue;
+    const node = el.firstChild as Text;
+    run.nodes.push({ node, start: run.text.length });
+    run.text += node.data;
+  }
+  return run;
+}
+
+function runBoxes(run: TextRun, start: number, end: number): DOMRect[] {
+  const boxes: DOMRect[] = [];
+  for (const { node, start: from } of run.nodes) {
+    const low = Math.max(start, from);
+    const high = Math.min(end, from + node.data.length);
+    if (low >= high) continue;
+    const range = document.createRange();
+    range.setStart(node, low - from);
+    range.setEnd(node, high - from);
+    boxes.push(...range.getClientRects());
+  }
+  return boxes;
+}
+
+/** The first match whose text is under the pointer, with where it is on screen. */
+function matchAt<M extends { start: number; end: number }>(run: TextRun, matches: M[], x: number, y: number) {
+  for (const match of matches) {
+    const boxes = runBoxes(run, match.start, match.end);
+    if (boxes.some((b) => x >= b.left - 1 && x <= b.right + 1 && y >= b.top - 1 && y <= b.bottom + 1)) {
+      const anchor: TextAnchor = { left: boxes[0].left, top: boxes[0].top, bottom: boxes[boxes.length - 1].bottom };
+      return { match, anchor };
+    }
+  }
+  return null;
 }
 
 function sheetWidth(): number {
@@ -70,6 +125,8 @@ export const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(prop
   const latest = useRef(props);
   latest.current = props;
   const cutId = useRef<string | null>(null);
+  const preferredScale = useRef(1);
+  const pageWidth = useRef(0);
 
   const repaint = () => {
     if (containerRef.current) {
@@ -81,9 +138,16 @@ export const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(prop
     goToPage(page) {
       if (viewerRef.current) viewerRef.current.currentPageNumber = page;
     },
+    goToMark(page, y) {
+      const container = containerRef.current;
+      const pageEl = container?.querySelector<HTMLElement>(`.page[data-page-number="${page}"]`);
+      if (container && pageEl) container.scrollTop = pageEl.offsetTop + y * pageEl.offsetHeight - 96;
+    },
     zoom(factor) {
       const viewer = viewerRef.current;
-      if (viewer) viewer.currentScale = Math.min(3, Math.max(0.5, viewer.currentScale * factor));
+      if (!viewer) return;
+      viewer.currentScale = Math.min(3, Math.max(0.5, viewer.currentScale * factor));
+      preferredScale.current = viewer.currentScale;
     },
     clearSelection() {
       window.getSelection()?.removeAllRanges();
@@ -113,6 +177,8 @@ export const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(prop
         const width = first.getViewport({ scale: 1 }).width * PDF_TO_CSS;
         const room = window.innerWidth - sheetWidth() - (window.innerWidth < 760 ? 16 : 64);
         viewer.currentScale = Math.min(1.4, Math.max(0.4, room / width));
+        preferredScale.current = viewer.currentScale;
+        pageWidth.current = width;
         repaint();
       });
       eventBus.on("pagerendered", repaint);
@@ -135,6 +201,86 @@ export const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(prop
       viewerRef.current = null;
     };
   }, [url]);
+
+  // Keeps the page fitting when a panel opens beside it, and restores its size when the panel closes.
+  useEffect(() => {
+    const container = containerRef.current!;
+    let timer: ReturnType<typeof setTimeout>;
+    const observer = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const viewer = viewerRef.current;
+        if (!viewer || !pageWidth.current) return;
+        const fit = (container.clientWidth - 32) / pageWidth.current;
+        const next = Math.max(0.4, Math.min(preferredScale.current, fit));
+        if (Math.abs(next - viewer.currentScale) > 0.01) viewer.currentScale = next;
+      }, 480);
+    });
+    observer.observe(container);
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, []);
+
+  // Definitions on hover, and citations on click.
+  useEffect(() => {
+    const container = containerRef.current!;
+    let frame = 0;
+    let shown: string | null = null;
+    const citationAt = (x: number, y: number) => {
+      const run = textRunAt(x, y);
+      if (!run || !latest.current.references.length) return null;
+      const hit = matchAt(run, findCitations(run.text, latest.current.references), x, y);
+      return hit && { ...hit, run };
+    };
+    const settle = (term: GuideTerm | null, anchor: TextAnchor | null, cursor: string) => {
+      container.dataset.over = cursor;
+      if ((term?.term ?? null) !== shown) {
+        shown = term?.term ?? null;
+        latest.current.onTerm(term, anchor);
+      }
+    };
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType === "touch") return;
+      const { clientX: x, clientY: y, buttons } = e;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (buttons || !window.getSelection()?.isCollapsed) return settle(null, null, "");
+        if (citationAt(x, y)) return settle(null, null, "citation");
+        const run = textRunAt(x, y);
+        const hit = run && matchAt(run, findTerms(run.text, latest.current.terms), x, y);
+        if (hit) settle(hit.match.term, hit.anchor, "term");
+        else settle(null, null, "");
+      });
+    };
+    const onLeave = () => {
+      cancelAnimationFrame(frame);
+      settle(null, null, "");
+    };
+    // Runs before pdf.js follows the PDF's own link, which would jump away from the sentence being read.
+    const onClickCapture = (e: MouseEvent) => {
+      if (!window.getSelection()?.isCollapsed) return;
+      const hit = citationAt(e.clientX, e.clientY);
+      if (!hit) return;
+      e.preventDefault();
+      e.stopPropagation();
+      latest.current.onCitation({
+        numbers: hit.match.numbers, page: hit.run.page, marker: hit.match.raw, line: hit.run.text.slice(0, 1000), anchor: hit.anchor,
+      });
+    };
+    container.addEventListener("pointermove", onMove, { passive: true });
+    container.addEventListener("pointerleave", onLeave);
+    container.addEventListener("scroll", onLeave, { passive: true });
+    container.addEventListener("click", onClickCapture, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      container.removeEventListener("pointermove", onMove);
+      container.removeEventListener("pointerleave", onLeave);
+      container.removeEventListener("scroll", onLeave);
+      container.removeEventListener("click", onClickCapture, true);
+    };
+  }, []);
 
   // Highlights and the focus veil.
   useEffect(() => {

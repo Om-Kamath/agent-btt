@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +9,7 @@ from margin.api import create_app
 
 @pytest.fixture
 def client(tmp_path, groq, groq_url):
-    return TestClient(create_app(data_dir=tmp_path, api_key="test", base_url=groq_url, max_retries=0, ollama_url=groq_url))
+    return TestClient(create_app(data_dir=tmp_path, api_key="test", base_url=groq_url, max_retries=0))
 
 
 @pytest.fixture
@@ -26,13 +27,31 @@ def ask(client, paper_id, **body):
         return [json.loads(line[6:]) for line in res.iter_lines() if line.startswith("data: ")]
 
 
-def test_health_reports_whether_groq_is_ready(tmp_path, client, groq_url):
-    health = client.get("/api/health").json()
-    assert health["default"] == "groq"
-    assert health["providers"]["groq"]["ready"] is True and health["providers"]["groq"]["local"] is False
-    keyless = TestClient(create_app(data_dir=tmp_path, api_key="", ollama_url=groq_url)).get("/api/health").json()
-    assert keyless["providers"]["groq"]["ready"] is False
-    assert "GROQ_API_KEY" in keyless["providers"]["groq"]["message"]
+def test_health_reports_whether_groq_is_ready(tmp_path, client):
+    assert client.get("/api/health").json()["ready"] is True
+    keyless = TestClient(create_app(data_dir=tmp_path, api_key="")).get("/api/health").json()
+    assert keyless["ready"] is False
+    assert "GROQ_API_KEY" in keyless["message"]
+
+
+def test_each_answer_records_which_model_wrote_it(client, paper_id):
+    assert ask(client, paper_id)[-1]["via"] == {"provider": "groq", "model": "openai/gpt-oss-120b"}
+
+
+def test_ollama_settings_left_in_the_environment_are_ignored(tmp_path, groq, groq_url, paper_bytes, monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    client = TestClient(create_app(data_dir=tmp_path, api_key="test", base_url=groq_url, max_retries=0))
+    pid = client.post("/api/papers", files={"file": ("a.pdf", paper_bytes, "application/pdf")}).json()["id"]
+    assert ask(client, pid)[-1]["via"]["provider"] == "groq"
+    assert groq.requests and all(r["api"] == "groq" for r in groq.requests)
+
+
+def test_langsmith_tracing_is_turned_off(tmp_path, groq_url, monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    create_app(data_dir=tmp_path, api_key="test", base_url=groq_url)
+    assert os.environ["LANGSMITH_TRACING"] == "false"
+    assert os.environ["LANGCHAIN_TRACING_V2"] == "false"
 
 
 def test_upload_returns_metadata_and_the_pdf_can_be_fetched(client, paper_bytes):

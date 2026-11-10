@@ -5,16 +5,10 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { linkCitations, normalizeMath } from "./lib";
-import type { Agent, Highlight, Intent, Turn } from "./types";
+import { StudyView } from "./Study";
+import { Trace } from "./Trace";
+import type { Highlight, Intent, Turn } from "./types";
 import { VisualView } from "./Visual";
-
-const AGENT_LABELS: Record<Agent, string> = {
-  coordinator: "Reading your highlight",
-  librarian: "Finding related passages",
-  tutor: "Writing an explanation",
-  illustrator: "Drawing a picture",
-  reviewer: "Checking against the paper",
-};
 
 function Status({ label }: { label: string }) {
   return (
@@ -25,7 +19,7 @@ function Status({ label }: { label: string }) {
   );
 }
 
-function Answer({ markdown, onPage }: { markdown: string; onPage(page: number): void }) {
+export function Answer({ markdown, onPage }: { markdown: string; onPage(page: number): void }) {
   return (
     <div className="answer">
       <ReactMarkdown
@@ -70,13 +64,17 @@ function CheckNote({ turn, onPage }: { turn: Turn; onPage(page: number): void })
     <div className="note">
       {turn.check === "passed" && <p>Reviewed against the paper. Mistakes are still possible.</p>}
       {turn.check === "unchecked" && <p>This answer wasn't reviewed against the paper.</p>}
+      {turn.check === "skipped" && turn.trace.some((s) => s.repair_error) && <p>This fixed picture wasn't reviewed again.</p>}
+      {turn.trace.some((s) => s.rewrite && s.outcome === "ok") && (
+        <p>The review rejected the first version, so this is the rewrite. Both are in the steps above.</p>
+      )}
       {turn.check === "flagged" && (
         <p className="flag" ref={flag}>
           <strong>Double-check this one.</strong> The review found a possible problem: {turn.caveat}
         </p>
       )}
       {turn.via && (
-        <p>Written by {turn.via.model} {turn.via.local ? "on this computer" : turn.via.provider === "groq" ? "on Groq" : "through Ollama"}.</p>
+        <p>Written by {turn.via.model}{turn.via.provider === "groq" && " on Groq"}.</p>
       )}
       {pages.length > 0 && (
         <p>
@@ -98,12 +96,15 @@ function CheckNote({ turn, onPage }: { turn: Turn; onPage(page: number): void })
 function TurnView(props: {
   turn: Turn;
   first: boolean;
+  last: boolean;
+  busy: boolean;
+  onAsk: SheetProps["onAsk"];
   onPage(page: number): void;
   onRetry(): void;
   onVisualFailure(error: string): void;
 }) {
-  const { turn, first, onPage, onRetry, onVisualFailure } = props;
-  const quiet = turn.status === "working" && !turn.markdown;
+  const { turn, first, last, busy, onAsk, onPage, onRetry, onVisualFailure } = props;
+  const rewriting = turn.status === "working" && turn.trace.some((s) => s.agent === "tutor" && s.rewrite);
   const ref = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -117,11 +118,19 @@ function TurnView(props: {
   return (
     <section className="turn" ref={ref}>
       {!first && <h3 className="turn-label">{turn.label}</h3>}
-      {turn.markdown && <Answer markdown={turn.markdown} onPage={onPage} />}
-      {turn.visual && <VisualView visual={turn.visual} onFailure={onVisualFailure} />}
-      {turn.status === "working" && (
-        <Status label={turn.agent ? AGENT_LABELS[turn.agent] : quiet ? "Reading your highlight" : "Finishing"} />
+      {turn.trace.length > 0 ? (
+        <Trace turn={turn} onPage={onPage} />
+      ) : (
+        turn.status === "working" && <Status label="Starting" />
       )}
+      {turn.markdown && (
+        <div className={rewriting ? "superseded" : undefined}>
+          {rewriting && <p className="superseded-note">The review found a problem with this draft. A rewrite is on the way.</p>}
+          <Answer markdown={turn.markdown} onPage={onPage} />
+        </div>
+      )}
+      {turn.visual && <VisualView visual={turn.visual} onFailure={onVisualFailure} />}
+      {turn.study && <StudyView turn={turn} last={last} busy={busy} onAsk={onAsk} onPage={onPage} />}
       {turn.status === "done" && <CheckNote turn={turn} onPage={onPage} />}
       {turn.status === "error" && (
         <div className="problem" role="alert">
@@ -140,7 +149,7 @@ interface SheetProps {
   open: boolean;
   onClose(): void;
   onRemove(): void;
-  onAsk(intent: Intent, label: string, question?: string): void;
+  onAsk(intent: Intent, label: string, question?: string, answer?: string): void;
   onRetry(turnId: string): void;
   onVisualFailure(turnId: string, error: string): void;
   onPage(page: number): void;
@@ -198,6 +207,9 @@ export function Sheet(props: SheetProps) {
                 key={turn.id}
                 turn={turn}
                 first={i === 0}
+                last={i === turns.length - 1}
+                busy={busy}
+                onAsk={onAsk}
                 onPage={onPage}
                 onRetry={() => onRetry(turn.id)}
                 onVisualFailure={(error) => onVisualFailure(turn.id, error)}
@@ -220,6 +232,9 @@ export function Sheet(props: SheetProps) {
               <button className="chip" type="button" disabled={busy} onClick={() => onAsk("example", "Example")}>
                 Example
               </button>
+              <button className="chip" type="button" disabled={busy} onClick={() => onAsk("quiz", "Test me")}>
+                Test me
+              </button>
             </>
           ) : (
             <button className="chip" type="button" disabled={busy} onClick={() => onAsk("explain", "Explain")}>
@@ -228,6 +243,9 @@ export function Sheet(props: SheetProps) {
           )}
           <button className="chip" type="button" disabled={busy} onClick={() => onAsk("visualize", "Visualize")}>
             Visualize
+          </button>
+          <button className="chip" type="button" disabled={busy} onClick={() => onAsk("prerequisites", "What to know first")}>
+            What to know first
           </button>
         </div>
         <form

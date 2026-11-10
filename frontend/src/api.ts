@@ -1,5 +1,5 @@
 import { SseParser } from "./lib";
-import type { AgentEvent, Intent, Paper, ProviderName, Visual } from "./types";
+import type { AgentEvent, CitationResult, Guide, Intent, Paper, Visual } from "./types";
 
 async function detail(res: Response, fallback: string): Promise<string> {
   try {
@@ -23,34 +23,43 @@ export async function getPaper(id: string): Promise<Paper | null> {
   return res.ok ? res.json() : null;
 }
 
-export interface ProviderHealth {
+export interface Health {
   ready: boolean;
-  local: boolean;
   message: string;
   model: string;
 }
 
-export interface Health {
-  default: ProviderName;
-  providers: Partial<Record<ProviderName, ProviderHealth>>;
-}
-
-/** Naming the active provider also tells the server to get its model ready. */
-export async function getHealth(active?: ProviderName): Promise<Health | null> {
-  const res = await fetch(active ? `/api/health?active=${active}` : "/api/health");
+export async function getHealth(): Promise<Health | null> {
+  const res = await fetch("/api/health");
   return res.ok ? res.json() : null;
 }
 
 export const paperFileUrl = (id: string) => `/api/papers/${id}/file`;
+
+export async function getGuide(paperId: string): Promise<Guide> {
+  const res = await fetch(`/api/papers/${paperId}/guide`, { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res, "The guide couldn't be written. Try again."));
+  return res.json();
+}
+
+export async function getCitation(paperId: string, body: { numbers: number[]; page: number; marker: string; line: string }): Promise<CitationResult> {
+  const res = await fetch(`/api/papers/${paperId}/citation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res, "This reference couldn't be looked up. Try again."));
+  return res.json();
+}
 
 export interface AskBody {
   selection: string;
   page: number;
   intent: Intent;
   question?: string;
+  answer?: string;
   history?: { role: "user" | "assistant"; content: string }[];
   repair?: { form: Visual["form"]; code: string; error: string };
-  provider?: ProviderName;
 }
 
 export async function ask(paperId: string, body: AskBody, signal: AbortSignal, onEvent: (e: AgentEvent) => void) {

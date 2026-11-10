@@ -1,35 +1,45 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ask, getHealth, getPaper, paperFileUrl, uploadPaper } from "./api";
+import { ask, getCitation, getGuide, getHealth, getPaper, paperFileUrl, uploadPaper } from "./api";
 import type { AskBody, Health } from "./api";
 import { PdfReader } from "./PdfReader";
-import type { ReaderHandle, SelectionInfo } from "./PdfReader";
+import type { CitationClick, ReaderHandle, SelectionInfo, TextAnchor } from "./PdfReader";
+import { NotesPrint } from "./NotesPrint";
+import { CitationCard, TermTip } from "./Popovers";
 import { Sheet } from "./Sheet";
-import { ConfirmCloud, ProviderSwitch } from "./ProviderSwitch";
-import type { Highlight, Intent, Paper, ProviderName, Turn } from "./types";
+import { Side } from "./Side";
+import type { SideTab } from "./Side";
+import { appendReasoning, applyTraceEvent, interruptTrace, markRenderFailure, notesFilename, notesMarkdown, turnAsText, withoutPrompts } from "./lib";
+import type { CitationResult, Guide, GuideTerm, Highlight, Intent, Paper, Turn } from "./types";
 
 const LAST_PAPER = "margin.lastPaper";
+const HIDE_MARKS = "margin.hideMarks";
 const highlightsKey = (paperId: string) => `margin.highlights.${paperId}`;
+const guideSeenKey = (paperId: string) => `margin.guideSeen.${paperId}`;
+const TERM_SHOW_MS = 300;
+const TERM_HIDE_MS = 220;
 const TOKEN_FLUSH_MS = 70;
+const SAVE_WHILE_WORKING_MS = 800;
 
 function loadHighlights(paperId: string): Highlight[] {
   try {
     const saved: Highlight[] = JSON.parse(localStorage.getItem(highlightsKey(paperId)) ?? "[]");
     return saved.map((h) => ({
       ...h,
-      turns: h.turns.map((t) =>
-        t.status === "working"
-          ? { ...t, status: "error" as const, error: "This answer was interrupted when the page closed." }
-          : t,
-      ),
+      turns: h.turns.map((t) => {
+        const trace = interruptTrace(t.trace ?? []); // Answers saved by older versions have no trace.
+        return t.status === "working"
+          ? { ...t, trace, status: "error" as const, error: "This answer was interrupted when the page closed." }
+          : { ...t, trace };
+      }),
     }));
   } catch {
     return [];
   }
 }
 
-function newTurn(intent: Intent, label: string, question = ""): Turn {
+function newTurn(intent: Intent, label: string, question = "", answer = ""): Turn {
   return {
-    id: crypto.randomUUID(), intent, label, question, status: "working", markdown: "", visual: null,
+    id: crypto.randomUUID(), intent, label, question, answer, status: "working", trace: [], markdown: "", visual: null,
     sources: [], check: "skipped", caveat: "", error: "", repairs: 0,
   };
 }
@@ -40,7 +50,7 @@ function historyBefore(highlight: Highlight, turnId: string): AskBody["history"]
     if (turn.id === turnId) break;
     if (turn.status !== "done") continue;
     history.push({ role: "user", content: turn.label });
-    history.push({ role: "assistant", content: turn.markdown || `Drew a picture: ${turn.visual?.caption ?? ""}` });
+    history.push({ role: "assistant", content: turnAsText(turn) });
   }
   return history;
 }
@@ -54,19 +64,23 @@ export function App() {
   const [page, setPage] = useState(1);
   const [notice, setNotice] = useState("");
   const [health, setHealth] = useState<Health | null>(null);
-  // Deliberately not saved: every session starts on the configured default, so using Groq once
-  // can't carry over to a later session without anyone noticing.
-  const [active, setActive] = useState<ProviderName | null>(null);
-  const [confirmingCloud, setConfirmingCloud] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [side, setSide] = useState<SideTab | null>(null);
+  const [guide, setGuide] = useState<Guide | null>(null);
+  const [guideError, setGuideError] = useState("");
+  const [guideTry, setGuideTry] = useState(0);
+  const [hideMarks, setHideMarks] = useState(() => localStorage.getItem(HIDE_MARKS) === "true");
+  const [printing, setPrinting] = useState(false);
+  const [tip, setTip] = useState<{ term: GuideTerm; anchor: TextAnchor } | null>(null);
+  const [citation, setCitation] = useState<{ click: CitationClick; result: CitationResult | null; error: string } | null>(null);
+  const tipTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const citations = useRef(new Map<string, CitationResult>());
 
   const reader = useRef<ReaderHandle>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const highlightsRef = useRef(highlights);
   highlightsRef.current = highlights;
-  const activeRef = useRef(active);
-  activeRef.current = active;
   const paperRef = useRef(paper);
   paperRef.current = paper;
   const streams = useRef(new Map<string, AbortController>());
@@ -81,15 +95,20 @@ export function App() {
     setSelection(null);
     setPage(1);
     setPaper(next);
+    setGuide(null);
+    setGuideError("");
+    setTip(null);
+    setCitation(null);
+    citations.current.clear();
+    // The guide opens by itself once, the first time a paper is seen.
+    setSide(localStorage.getItem(guideSeenKey(next.id)) ? null : "guide");
+    localStorage.setItem(guideSeenKey(next.id), "true");
     localStorage.setItem(LAST_PAPER, next.id);
   }, []);
 
   useEffect(() => {
     getHealth()
-      .then((found) => {
-        setHealth(found);
-        if (found) setActive(found.default);
-      })
+      .then(setHealth)
       .catch(() => {});
     const last = localStorage.getItem(LAST_PAPER);
     if (!last) {
@@ -104,12 +123,49 @@ export function App() {
 
   useEffect(() => {
     if (!paper) return;
-    try {
-      localStorage.setItem(highlightsKey(paper.id), JSON.stringify(highlights));
-    } catch {
-      setNotice("Highlights can't be saved because browser storage is full.");
+    const save = () => {
+      const key = highlightsKey(paper.id);
+      try {
+        localStorage.setItem(key, JSON.stringify(highlights));
+      } catch {
+        try {
+          localStorage.setItem(key, JSON.stringify(withoutPrompts(highlights)));
+        } catch {
+          setNotice("Highlights can't be saved because browser storage is full.");
+        }
+      }
+    };
+    // Streaming changes this many times a second, and each save rewrites everything.
+    if (!highlights.some((h) => h.turns.some((t) => t.status === "working"))) {
+      save();
+      return;
     }
+    const timer = setTimeout(save, SAVE_WHILE_WORKING_MS);
+    return () => clearTimeout(timer);
   }, [highlights, paper]);
+
+  const paperId = paper?.id;
+  const groqReady = health?.ready;
+  useEffect(() => {
+    if (!paperId || groqReady === undefined) return;
+    if (!groqReady) {
+      setGuideError(health?.message ?? "");
+      return;
+    }
+    let current = true;
+    setGuideError("");
+    getGuide(paperId)
+      .then((found) => current && setGuide(found))
+      .catch((error) => current && setGuideError((error as Error).message));
+    return () => {
+      current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paperId, groqReady, guideTry]);
+
+  useEffect(() => {
+    localStorage.setItem(HIDE_MARKS, String(hideMarks));
+  }, [hideMarks]);
 
   const open = async (file: File) => {
     setNotice("");
@@ -140,13 +196,19 @@ export function App() {
       const controller = new AbortController();
       streams.current.set(turn.id, controller);
       let pending = "";
+      let thoughts: { step: string; text: string }[] = [];
       let timer: ReturnType<typeof setTimeout> | null = null;
       const flush = () => {
         timer = null;
-        if (!pending) return;
         const text = pending;
+        const arrived = thoughts;
         pending = "";
-        patchTurn(highlight.id, turn.id, (t) => ({ markdown: t.markdown + text }));
+        thoughts = [];
+        if (!text && !arrived.length) return;
+        patchTurn(highlight.id, turn.id, (t) => ({
+          markdown: t.markdown + text,
+          trace: arrived.reduce((trace, a) => appendReasoning(trace, a.step, a.text), t.trace),
+        }));
       };
       const fail = (message: string) => {
         if (timer) clearTimeout(timer);
@@ -162,15 +224,21 @@ export function App() {
             page: highlight.page,
             intent: repair ? "repair" : turn.intent,
             question: turn.question,
+            answer: turn.answer,
             history: historyBefore(highlight, turn.id),
             repair,
-            // Always the current choice, even for a retry of an answer that came from elsewhere.
-            provider: activeRef.current ?? undefined,
           },
           controller.signal,
           (event) => {
-            if (event.type === "step") {
-              patchTurn(highlight.id, turn.id, () => ({ agent: event.agent }));
+            if (event.type === "step" || event.type === "step_done") {
+              if (timer) clearTimeout(timer);
+              flush();
+              patchTurn(highlight.id, turn.id, (t) => ({ trace: applyTraceEvent(t.trace, event, Date.now()) }));
+            } else if (event.type === "reasoning") {
+              const last = thoughts[thoughts.length - 1];
+              if (last?.step === event.step) last.text += event.text;
+              else thoughts.push({ step: event.step, text: event.text });
+              timer ??= setTimeout(flush, TOKEN_FLUSH_MS);
             } else if (event.type === "token") {
               pending += event.text;
               timer ??= setTimeout(flush, TOKEN_FLUSH_MS);
@@ -178,14 +246,17 @@ export function App() {
               settled = true;
               if (timer) clearTimeout(timer);
               pending = "";
-              patchTurn(highlight.id, turn.id, () => ({
+              flush();
+              patchTurn(highlight.id, turn.id, (t) => ({
                 status: "done",
                 markdown: event.markdown,
                 visual: event.visual,
-                sources: event.sources,
+                // A repair doesn't search the paper again, so the original sources still apply.
+                sources: (t.sources.length && !event.sources.length) ? t.sources : event.sources,
                 check: event.check,
                 caveat: event.caveat,
                 via: event.via,
+                study: event.study ?? null,
               }));
             } else if (event.type === "error") {
               settled = true;
@@ -204,8 +275,8 @@ export function App() {
   );
 
   const addTurn = useCallback(
-    (highlight: Highlight, intent: Intent, label: string, question = "") => {
-      const turn = newTurn(intent, label, question);
+    (highlight: Highlight, intent: Intent, label: string, question = "", answer = "") => {
+      const turn = newTurn(intent, label, question, answer);
       const updated = { ...highlight, turns: [...highlight.turns, turn] };
       setHighlights((all) => all.map((h) => (h.id === highlight.id ? updated : h)));
       stream(updated, turn);
@@ -239,7 +310,7 @@ export function App() {
     if (!shown) return;
     const turn = shown.turns.find((t) => t.id === turnId);
     if (!turn) return;
-    const reset: Turn = { ...turn, status: "working", markdown: "", visual: null, error: "", agent: undefined, repairs: 0 };
+    const reset: Turn = { ...turn, status: "working", trace: [], markdown: "", visual: null, study: null, error: "", repairs: 0 };
     const updated = { ...shown, turns: shown.turns.map((t) => (t.id === turnId ? reset : t)) };
     setHighlights((all) => all.map((h) => (h.id === shown.id ? updated : h)));
     stream(updated, reset);
@@ -251,53 +322,92 @@ export function App() {
     const turn = shown.turns.find((t) => t.id === turnId);
     if (!turn?.visual) return;
     const { form, code } = turn.visual;
+    const trace = markRenderFailure(turn.trace, error);
     if (turn.repairs >= 1) {
-      patchTurn(shown.id, turnId, () => ({ visual: null, status: "error", error: "This picture couldn't be drawn." }));
+      patchTurn(shown.id, turnId, () => ({ trace, visual: null, status: "error", error: "This picture couldn't be displayed, even after a fix. Try again, or ask for an explanation." }));
       return;
     }
-    const reset: Turn = { ...turn, status: "working", visual: null, agent: "illustrator", repairs: turn.repairs + 1 };
+    const reset: Turn = { ...turn, trace, status: "working", visual: null, repairs: turn.repairs + 1 };
     patchTurn(shown.id, turnId, () => reset);
     stream(shown, reset, { form, code, error });
   };
 
+  const removeHighlights = (ids: string[]) => {
+    highlightsRef.current
+      .filter((h) => ids.includes(h.id))
+      .forEach((h) => h.turns.forEach((t) => streams.current.get(t.id)?.abort()));
+    setHighlights((all) => all.filter((h) => !ids.includes(h.id)));
+    setActiveId((id) => (id && ids.includes(id) ? null : id));
+  };
+
   const remove = () => {
-    if (!shown) return;
-    shown.turns.forEach((t) => streams.current.get(t.id)?.abort());
-    setHighlights((all) => all.filter((h) => h.id !== shown.id));
-    setActiveId(null);
+    if (shown) removeHighlights([shown.id]);
   };
 
-  const chooseProvider = (next: ProviderName) => {
-    if (next === active) return;
-    const target = health?.providers[next];
-    if (!target) return;
-    if (!target.local && !target.ready) {
-      setNotice(target.message);
-      return;
+  const onTerm = useCallback((term: GuideTerm | null, anchor: TextAnchor | null) => {
+    clearTimeout(tipTimer.current);
+    tipTimer.current = term && anchor
+      ? setTimeout(() => setTip({ term, anchor }), TERM_SHOW_MS)
+      : setTimeout(() => setTip(null), TERM_HIDE_MS);
+  }, []);
+
+  const lookUp = useCallback(async (click: CitationClick) => {
+    const current = paperRef.current;
+    if (!current) return;
+    setTip(null);
+    const key = `${click.page}:${click.numbers.join(",")}:${click.line.length}`;
+    const known = citations.current.get(key);
+    setCitation({ click, result: known ?? null, error: "" });
+    if (known) return;
+    const stillOpen = (c: typeof citation) => c?.click === click;
+    try {
+      const { anchor: _, ...body } = click;
+      const result = await getCitation(current.id, body);
+      citations.current.set(key, result);
+      setCitation((c) => (stillOpen(c) ? { click, result, error: "" } : c));
+    } catch (error) {
+      setCitation((c) => (stillOpen(c) ? { click, result: null, error: (error as Error).message } : c));
     }
-    if (!target.local) {
-      setConfirmingCloud(true);
-      return;
-    }
-    switchTo(next);
+  }, []);
+
+  const closeCitation = useCallback(() => setCitation(null), []);
+
+  const exportMarkdown = () => {
+    if (!paper) return;
+    const url = URL.createObjectURL(new Blob([notesMarkdown(paper.name, highlights)], { type: "text/markdown" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = notesFilename(paper.name);
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
-  const switchTo = (next: ProviderName) => {
-    setNotice("");
-    setConfirmingCloud(false);
-    setActive(next);
-    getHealth(next).then((found) => found && setHealth(found)).catch(() => {});
+  const finishPrinting = useCallback(() => setPrinting(false), []);
+
+  const openHighlight = (highlight: Highlight) => {
+    reader.current?.goToMark(highlight.page, highlight.marks[0]?.rects[0]?.y ?? 0);
+    setActiveId(highlight.id);
+    if (window.innerWidth < 760) setSide(null);
+  };
+
+  const goToPage = (page: number) => {
+    reader.current?.goToPage(page);
+    setTip(null);
+    if (window.innerWidth < 760) setSide(null);
   };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (confirmingCloud) return;
       if (e.key === "Escape") {
-        if (selection) {
+        if (citation) {
+          setCitation(null);
+        } else if (selection) {
           reader.current?.clearSelection();
           setSelection(null);
-        } else {
+        } else if (activeId) {
           setActiveId(null);
+        } else {
+          setSide(null);
         }
         return;
       }
@@ -307,7 +417,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selection, startFromSelection, confirmingCloud]);
+  }, [selection, startFromSelection, citation, activeId]);
 
   const filePicker = (
     <input
@@ -341,7 +451,7 @@ export function App() {
 
   if (restoring) return null;
 
-  const current = active ? health?.providers[active] : undefined;
+  const setupMessage = health?.message;
 
   if (!paper) {
     return (
@@ -354,8 +464,7 @@ export function App() {
         </button>
         <p className="small">or drop one here</p>
         {notice && <p className="welcome-notice" role="alert">{notice}</p>}
-        {current?.message && <p className="welcome-notice">{current.message}</p>}
-        {current?.local && !current.message && <p className="welcome-notice">Your papers stay on this computer.</p>}
+        {setupMessage && <p className="welcome-notice">{setupMessage}</p>}
       </main>
     );
   }
@@ -367,12 +476,12 @@ export function App() {
   };
 
   return (
-    <div className={`app${activeId ? " sheet-open" : ""}${dragging ? " dragging" : ""}`} {...dropHandlers}>
+    <div className={`app${activeId ? " sheet-open" : ""}${side ? " side-open" : ""}${dragging ? " dragging" : ""}`} {...dropHandlers}>
       {filePicker}
       <header className="bar">
         <span className="bar-start">
           <span className="title" title={paper.name}>{paper.name}</span>
-          {health && active && <ProviderSwitch providers={health.providers} active={active} onChoose={chooseProvider} />}
+          {health && <span className="where" title={`Your highlights, your questions, and text from this paper are sent to Groq (${health.model})`}>Using Groq</span>}
         </span>
         <span className="page-count">Page {page} of {paper.pages}</span>
         <div className="bar-actions">
@@ -381,6 +490,12 @@ export function App() {
           </button>
           <button className="icon" type="button" aria-label="Zoom in" onClick={() => reader.current?.zoom(1.15)}>
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+          </button>
+          <button className="quiet" type="button" aria-pressed={side === "guide"} onClick={() => setSide(side === "guide" ? null : "guide")}>
+            Guide
+          </button>
+          <button className="quiet" type="button" aria-pressed={side === "highlights"} onClick={() => setSide(side === "highlights" ? null : "highlights")}>
+            Highlights{highlights.length > 0 ? ` (${highlights.length})` : ""}
           </button>
           <button className="quiet" type="button" onClick={() => fileInput.current?.click()}>
             {uploading ? "Opening" : "Open another"}
@@ -393,8 +508,12 @@ export function App() {
           key={paper.id}
           ref={reader}
           url={paperFileUrl(paper.id)}
-          highlights={highlights}
+          highlights={hideMarks ? highlights.filter((h) => h.id === activeId) : highlights}
           activeId={activeId}
+          terms={guide?.terms ?? []}
+          references={paper.references}
+          onTerm={onTerm}
+          onCitation={lookUp}
           onSelection={setSelection}
           onOpenHighlight={setActiveId}
           onPage={setPage}
@@ -409,22 +528,62 @@ export function App() {
         </div>
       )}
 
+      {side && (
+        <Side
+          tab={side}
+          guide={guide}
+          guideError={guideError}
+          highlights={highlights}
+          activeId={activeId}
+          hidden={hideMarks}
+          onTab={setSide}
+          onClose={() => setSide(null)}
+          onRetryGuide={() => setGuideTry((n) => n + 1)}
+          onPage={goToPage}
+          onOpenHighlight={openHighlight}
+          onRemoveHighlight={(id) => removeHighlights([id])}
+          onClearHighlights={() => removeHighlights(highlights.map((h) => h.id))}
+          onToggleHidden={() => setHideMarks(!hideMarks)}
+          onExportMarkdown={exportMarkdown}
+          onExportPdf={() => setPrinting(true)}
+        />
+      )}
+
+      {tip && (
+        <TermTip
+          term={tip.term}
+          anchor={tip.anchor}
+          onEnter={() => clearTimeout(tipTimer.current)}
+          onLeave={() => onTerm(null, null)}
+          onPage={goToPage}
+        />
+      )}
+      {citation && (
+        <CitationCard
+          anchor={citation.click.anchor}
+          numbers={citation.click.numbers}
+          result={citation.result}
+          error={citation.error}
+          onClose={closeCitation}
+          onRetry={() => lookUp(citation.click)}
+        />
+      )}
+      {printing && <NotesPrint name={paper.name} highlights={highlights} onDone={finishPrinting} />}
+
       {highlights.length === 0 && !selection && !notice && (
-        <p className="hint">{current?.message || "Select any passage you don't understand."}</p>
+        <p className="hint">{setupMessage || "Select any passage you don't understand."}</p>
       )}
       {notice && <p className="toast" role="alert">{notice}</p>}
-
-      {confirmingCloud && <ConfirmCloud onConfirm={() => switchTo("groq")} onCancel={() => setConfirmingCloud(false)} />}
 
       <Sheet
         highlight={shown}
         open={Boolean(activeId)}
         onClose={() => setActiveId(null)}
         onRemove={remove}
-        onAsk={(intent, label, question) => shown && addTurn(shown, intent, label, question)}
+        onAsk={(intent, label, question, answer) => shown && addTurn(shown, intent, label, question, answer)}
         onRetry={retry}
         onVisualFailure={visualFailed}
-        onPage={(n) => reader.current?.goToPage(n)}
+        onPage={goToPage}
       />
     </div>
   );
